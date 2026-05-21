@@ -831,8 +831,18 @@ def main():
     if image.mode != 'RGB':
         image = image.convert('RGB')
         
+    # Define and create output directories
+    output_dir = os.path.join(target_dir, 'outputs')
+    csv_dir = os.path.join(output_dir, 'csv')
+    img_dir = os.path.join(output_dir, 'images')
+    
+    os.makedirs(csv_dir, exist_ok=True)
+    os.makedirs(img_dir, exist_ok=True)
+    
+    print(f"All outputs will be saved to: {output_dir} and its subdirectories")
+        
     # Save a copy of the image being analyzed so the user can see it
-    out_img_path = os.path.join(target_dir, 'analyzed_map.png')
+    out_img_path = os.path.join(img_dir, 'analyzed_map.png')
     image.save(out_img_path)
     print(f"Saved the image being analyzed to '{out_img_path}'.")
     
@@ -865,7 +875,7 @@ def main():
         
         # Generate training visualization for target directory if JSON exists
         if os.path.exists(training_json_path):
-            train_vis_path = os.path.join(target_dir, "visualization_training.png")
+            train_vis_path = os.path.join(img_dir, "visualization_training.png")
             generate_training_visualization(image, training_json_path, train_vis_path)
     else:
         print("  No training samples found globally. Using HSV fallback classifier.")
@@ -895,7 +905,7 @@ def main():
                                  heightmap_array, classifier, label_names)
     
     # 4. Export to CSV (includes HSV debug columns)
-    csv_filename = os.path.join(target_dir, "terrain_grid.csv")
+    csv_filename = os.path.join(csv_dir, "terrain_grid.csv")
     print(f"\nExporting data to {csv_filename}...")
     with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=[
@@ -909,13 +919,43 @@ def main():
     print(f"Total grid points generated: {len(grid)}")
     
     # 5. Generate Visualizations
-    vis_filename = os.path.join(target_dir, "visualization_overlay.png")
+    vis_filename = os.path.join(img_dir, "visualization_overlay.png")
     generate_visualization(image, grid, vis_filename)
     
-    height_vis_filename = os.path.join(target_dir, "visualization_heights.png")
+    height_vis_filename = os.path.join(img_dir, "visualization_heights.png")
     generate_height_visualization(image, grid, height_vis_filename)
     
     print("You can use this CSV for your UWB Path Planning algorithm.")
+
+    # Automatically run the A* pathfinder
+    print("\n======================================================")
+    print("Running A* Pathfinder...")
+    print("======================================================")
+    
+    # astar.py is in the parent directory of TerrainPlan.py
+    astar_script = os.path.abspath(os.path.join(script_dir, "..", "astar.py"))
+    
+    if os.path.exists(astar_script):
+        import subprocess
+        try:
+            subprocess.run([sys.executable, astar_script, output_dir], check=True)
+            
+            # Automatically open the final path overlay image
+            final_img_path = os.path.join(img_dir, "path_overlay.png")
+            if os.path.exists(final_img_path):
+                print(f"\nOpening final path overlay image: {final_img_path}")
+                if sys.platform == "win32":
+                    os.startfile(final_img_path)
+                elif sys.platform == "darwin":
+                    subprocess.call(["open", final_img_path])
+                else:
+                    subprocess.call(["xdg-open", final_img_path])
+        except subprocess.CalledProcessError as e:
+            print(f"A* Pathfinder failed with error: {e}")
+        except Exception as e:
+            print(f"Failed to execute A* Pathfinder: {e}")
+    else:
+        print(f"Warning: Could not find astar.py at {astar_script}")
 
 if __name__ == "__main__":
     main()
