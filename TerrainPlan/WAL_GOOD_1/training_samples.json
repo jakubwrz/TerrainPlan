@@ -1,0 +1,31 @@
+{
+    "description": "Training samples for WAL_GOOD_1 - grass, concrete walkway, tree shadow",
+    "samples": [
+        {
+            "terrain": "GRASS",
+            "regions": [
+                {"x": 300, "y": 100, "w": 40, "h": 40},
+                {"x": 350, "y": 250, "w": 30, "h": 30},
+                {"x": 50, "y": 50, "w": 30, "h": 30},
+                {"x": 400, "y": 300, "w": 25, "h": 25}
+            ]
+        },
+        {
+            "terrain": "CONCRETE",
+            "regions": [
+                {"x": 200, "y": 250, "w": 15, "h": 30},
+                {"x": 280, "y": 300, "w": 15, "h": 20},
+                {"x": 150, "y": 210, "w": 15, "h": 15},
+                {"x": 370, "y": 340, "w": 15, "h": 7}
+            ]
+        },
+        {
+            "terrain": "TREE/CANOPY",
+            "regions": [
+                {"x": 100, "y": 335, "w": 30, "h": 10},
+                {"x": 150, "y": 340, "w": 20, "h": 7},
+                {"x": 50, "y": 340, "w": 20, "h": 7}
+            ]
+        }
+    ]
+}
