@@ -1,0 +1,87 @@
+{
+  "room": {
+    "width": 4.0,
+    "depth": 3.0,
+    "height": 2.5,
+    "description": "Room dimensions in meters (width=x, depth=y, height=z)"
+  },
+  "coordinate_system": {
+    "origin": "South-West corner at floor level",
+    "x_axis": "East (4m)",
+    "y_axis": "North (3m)",
+    "z_axis": "Up (2.5m)"
+  },
+  "anchors": {
+    "0": {
+      "position": [0.0, 2.5, 0.0],
+      "description": "North-West corner, ceiling",
+      "enabled": true
+    },
+    "1": {
+      "position": [3.5, 3.0, 1.0],
+      "description": "North-East corner, ceiling",
+      "enabled": true
+    },
+    "2": {
+      "position": [3.5, 0.4, 0.6],
+      "description": "South-East corner, mid-height",
+      "enabled": true
+    },
+    "3": {
+      "position": [0.0, 0.5, 2.4],
+      "description": "South-West corner, mid-height",
+      "enabled": false
+    },
+    "4": {
+      "position": [2.0, 3.0, 0.0],
+      "description": "North wall center, floor (optional)",
+      "enabled": false
+    },
+    "5": {
+      "position": [4.0, 1.5, 0.0],
+      "description": "East wall center, floor (optional)",
+      "enabled": false
+    },
+    "6": {
+      "position": [2.0, 0.0, 0.0],
+      "description": "South wall center, floor (optional)",
+      "enabled": false
+    },
+    "7": {
+      "position": [0.0, 1.5, 0.0],
+      "description": "West wall center, floor (optional)",
+      "enabled": false
+    }
+  },
+  "positioning": {
+    "min_anchors": 4,
+    "max_residual": 0.5,
+    "outlier_threshold": 0.3,
+    "kalman_filter": {
+      "enabled": true,
+      "process_noise": 0.002,
+      "measurement_noise": 0.09,
+      "initial_variance": 1.0,
+      "_comment": "Process noise: how much to trust motion model (lower = smoother). Measurement noise: how much to trust new positions (higher = smoother but more lag). Current settings smooth over ~2-3 seconds."
+    }
+  },
+  "calibration": {
+    "_comment": "Distance calibration data for UWB ranging. Per-anchor corrections applied in software, device_parameters sent to BU03 via AT+SETDEV",
+    "per_anchor": {
+      "0": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []},
+      "1": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []},
+      "2": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []},
+      "3": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []},
+      "4": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []},
+      "5": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []},
+      "6": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []},
+      "7": {"scale_factor": 1.0, "offset_mm": 0.0, "measurements": []}
+    },
+    "device_parameters": {
+      "antenna_delay": 16336,
+      "correction_a": 1.0,
+      "correction_b": 0.0,
+      "_comment": "Parameters for AT+SETDEV command. antenna_delay compensates for chip propagation delay, correction_a/b apply linear correction: corrected = a * measured + b"
+    }
+  }
+}
