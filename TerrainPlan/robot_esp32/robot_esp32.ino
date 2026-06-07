@@ -27,7 +27,12 @@ const char* password = "YOUR_WIFI_PASSWORD";     // Replace with your Wi-Fi pass
 const char* mqtt_broker = "broker.hivemq.com";
 const int mqtt_port = 1883;
 const char* mqtt_topic = "rover/motors/commands";
+const char* mqtt_uwb_topic = "rover/uwb/raw";
 const char* client_id = "ESP32_Rover_Client";
+
+// UWB Configuration
+#define PIN_UWB_RX 16
+#define PIN_UWB_TX 17
 
 // Pin Definitions for Cytron Maker Drive dual-channel motor driver
 // (Change these pins to match your physical wiring)
@@ -114,6 +119,83 @@ void stopRobot() {
   setMotorLeft(0);
   setMotorRight(0);
   Serial.println("Motors Halted.");
+}
+
+// =============================================================================
+// UWB TELEMETRY PROCESSING
+// =============================================================================
+
+uint8_t uwb_buf[128];
+int uwb_buf_len = 0;
+const char* UWB_HEADER = "CmdM:4[";
+const int UWB_HEADER_LEN = 7;
+
+void processUWB() {
+  while (Serial2.available() > 0) {
+    uint8_t c = Serial2.read();
+    
+    // Add byte to buffer if space is available
+    if (uwb_buf_len < sizeof(uwb_buf)) {
+      uwb_buf[uwb_buf_len++] = c;
+    } else {
+      // Buffer overflow, shift left to make room
+      memmove(uwb_buf, uwb_buf + 1, uwb_buf_len - 1);
+      uwb_buf[uwb_buf_len - 1] = c;
+    }
+    
+    // Try to find header in the buffer
+    int header_idx = -1;
+    for (int i = 0; i <= uwb_buf_len - UWB_HEADER_LEN; i++) {
+      if (memcmp(uwb_buf + i, UWB_HEADER, UWB_HEADER_LEN) == 0) {
+        header_idx = i;
+        break;
+      }
+    }
+    
+    if (header_idx > 0) {
+      // If header is found but not at start, discard everything before header
+      memmove(uwb_buf, uwb_buf + header_idx, uwb_buf_len - header_idx);
+      uwb_buf_len -= header_idx;
+    } else if (header_idx == -1 && uwb_buf_len >= UWB_HEADER_LEN) {
+      // No header found and buffer has at least UWB_HEADER_LEN bytes.
+      // Keep only the last UWB_HEADER_LEN - 1 bytes in case the header is partially read.
+      memmove(uwb_buf, uwb_buf + uwb_buf_len - (UWB_HEADER_LEN - 1), UWB_HEADER_LEN - 1);
+      uwb_buf_len = UWB_HEADER_LEN - 1;
+    }
+    
+    // Check if we have a complete packet (starting with header and ending with \r\n)
+    if (uwb_buf_len >= UWB_HEADER_LEN + 2) {
+      // Look for \r\n after the header
+      int end_idx = -1;
+      for (int i = UWB_HEADER_LEN; i < uwb_buf_len - 1; i++) {
+        if (uwb_buf[i] == '\r' && uwb_buf[i+1] == '\n') {
+          end_idx = i;
+          break;
+        }
+      }
+      
+      if (end_idx != -1) {
+        int packet_len = end_idx + 2;
+        
+        // We have a full packet! Publish it to MQTT if connected
+        if (client.connected()) {
+          if (client.publish(mqtt_uwb_topic, uwb_buf, packet_len)) {
+            Serial.print("UWB Telemetry: Published packet of ");
+            Serial.print(packet_len);
+            Serial.println(" bytes.");
+          } else {
+            Serial.println("❌ UWB Telemetry: MQTT Publish failed.");
+          }
+        } else {
+          Serial.println("⚠️ UWB Telemetry: Skipped publish (MQTT disconnected).");
+        }
+        
+        // Shift remaining bytes in buffer
+        memmove(uwb_buf, uwb_buf + packet_len, uwb_buf_len - packet_len);
+        uwb_buf_len -= packet_len;
+      }
+    }
+  }
 }
 
 // =============================================================================
@@ -204,6 +286,10 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\n--- ESP32 Rover Motor Controller Starting ---");
 
+  // Initialize Serial2 for UWB BU03 communication
+  Serial2.begin(115200, SERIAL_8N1, PIN_UWB_RX, PIN_UWB_TX);
+  Serial.println("✓ Serial2 initialized for UWB at 115200 baud.");
+
   // Setup motor pins
   setupMotors();
 
@@ -234,4 +320,7 @@ void loop() {
     // Process incoming messages and keep connection alive
     client.loop();
   }
+
+  // Process UWB ranging telemetry
+  processUWB();
 }

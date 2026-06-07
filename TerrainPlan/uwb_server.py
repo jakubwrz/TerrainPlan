@@ -13,6 +13,7 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 import threading
 from position_solver import PositionSolver
 import numpy as np
+import paho.mqtt.client as mqtt
 
 try:
     import bridge_control
@@ -210,6 +211,115 @@ def parse_uwb_packet(data):
 
     return anchors if anchors else None
 
+# Thread lock to protect concurrent updates to latest_data/solver from Serial and MQTT threads
+data_lock = threading.Lock()
+detected_anchors = set()
+
+def process_uwb_packet(packet, source_name):
+    """
+    Process a raw UWB packet from a source (Serial or MQTT).
+    Parses the packet, solves the 3D position, runs the motor control loop,
+    and updates the latest_data dictionary.
+    """
+    global latest_data, position_solver, detected_anchors
+
+    anchors = parse_uwb_packet(packet)
+    if not anchors:
+        return False
+
+    with data_lock:
+        latest_data['packet_count'] += 1
+
+        # Track newly detected anchors
+        new_anchors = set(anchors.keys()) - detected_anchors
+        if new_anchors:
+            detected_anchors.update(new_anchors)
+            print(f"✓ Detected anchors via {source_name}: {sorted(detected_anchors, key=int)}")
+
+        # Get full status for all 8 anchors
+        all_anchors_status = get_all_anchors_status(anchors)
+
+        # Calculate 3D position if solver is available
+        position_data = {
+            'x': None,
+            'y': None,
+            'z': None,
+            'success': False,
+            'num_anchors': 0,
+            'residual': None,
+            'velocity': {'x': 0, 'y': 0, 'z': 0},
+            'failure_reason': None
+        }
+
+        if position_solver:
+            result = position_solver.solve(anchors)
+            position_data['success'] = result['success']
+            position_data['num_anchors'] = result['num_anchors']
+            position_data['residual'] = result['residual']
+            position_data['failure_reason'] = result.get('failure_reason')
+
+            if result['success'] and result['position']:
+                position_data['x'] = result['position'][0]
+                position_data['y'] = result['position'][1]
+                position_data['z'] = result['position'][2]
+
+                if result['velocity']:
+                    position_data['velocity']['x'] = result['velocity'][0]
+                    position_data['velocity']['y'] = result['velocity'][1]
+                    position_data['velocity']['z'] = result['velocity'][2]
+
+                # Run robot motor control loop
+                if bridge_control is not None:
+                    try:
+                        bridge_control.process_new_position(position_data['x'], position_data['y'])
+                    except Exception as e:
+                        print(f"Error calling bridge_control.process_new_position: {e}")
+
+        latest_data.update({
+            'timestamp': time.time(),
+            'anchors': all_anchors_status,
+            'device_port': source_name,
+            'format': f'{len(anchors)} Active Anchor{"s" if len(anchors) != 1 else ""}',
+            'position': position_data
+        })
+    return True
+
+def run_mqtt_subscriber():
+    """Start MQTT subscriber to receive UWB packets wirelessly"""
+    mqtt_broker = "broker.hivemq.com"
+    mqtt_port = 1883
+    mqtt_topic = "rover/uwb/raw"
+
+    print(f"Starting MQTT UWB subscriber on {mqtt_broker}:{mqtt_port}, topic: {mqtt_topic}")
+
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print("✓ Connected to HiveMQ MQTT Broker for UWB telemetry!")
+            client.subscribe(mqtt_topic)
+        else:
+            print(f"❌ Failed to connect to MQTT broker, rc={rc}")
+
+    def on_message(client, userdata, msg):
+        try:
+            # Check if payload contains the UWB packet signature
+            if b'CmdM:4[' in msg.payload:
+                process_uwb_packet(msg.payload, "MQTT (Wireless)")
+        except Exception as e:
+            print(f"Error in MQTT packet callback: {e}")
+
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    # Keep trying to connect in a loop in case broker is down
+    while True:
+        try:
+            client.connect(mqtt_broker, mqtt_port, 60)
+            client.loop_forever()
+        except Exception as e:
+            print(f"MQTT subscriber connection error: {e}. Retrying in 5s...")
+            time.sleep(5)
+
 
 def read_uwb_data(port='/dev/ttyACM0'):
     """Read UWB data with auto-reconnect on disconnection"""
@@ -219,8 +329,6 @@ def read_uwb_data(port='/dev/ttyACM0'):
 
     ser = None
     buffer = b''
-    packet_count = 0
-    detected_anchors = set()
     reconnect_delay = 2.0  # seconds
     failed_attempts = 0
     last_error_print = 0
@@ -302,64 +410,7 @@ def read_uwb_data(port='/dev/ttyACM0'):
                         packet = buffer[start:end+2]
                         buffer = buffer[end+2:]
 
-                        anchors = parse_uwb_packet(packet)
-
-                        if anchors:
-                            packet_count += 1
-
-                            # Track newly detected anchors
-                            new_anchors = set(anchors.keys()) - detected_anchors
-                            if new_anchors:
-                                detected_anchors.update(new_anchors)
-                                print(f"✓ Detected anchors: {sorted(detected_anchors, key=int)}")
-
-                            # Get full status for all 8 anchors
-                            all_anchors_status = get_all_anchors_status(anchors)
-
-                            # Calculate 3D position if solver is available
-                            position_data = {
-                                'x': None,
-                                'y': None,
-                                'z': None,
-                                'success': False,
-                                'num_anchors': 0,
-                                'residual': None,
-                                'velocity': {'x': 0, 'y': 0, 'z': 0},
-                                'failure_reason': None
-                            }
-
-                            if position_solver:
-                                result = position_solver.solve(anchors)
-                                position_data['success'] = result['success']
-                                position_data['num_anchors'] = result['num_anchors']
-                                position_data['residual'] = result['residual']
-                                position_data['failure_reason'] = result.get('failure_reason')
-
-                                if result['success'] and result['position']:
-                                    position_data['x'] = result['position'][0]
-                                    position_data['y'] = result['position'][1]
-                                    position_data['z'] = result['position'][2]
-
-                                    if result['velocity']:
-                                        position_data['velocity']['x'] = result['velocity'][0]
-                                        position_data['velocity']['y'] = result['velocity'][1]
-                                        position_data['velocity']['z'] = result['velocity'][2]
-
-                                    # Run robot motor control loop
-                                    if bridge_control is not None:
-                                        try:
-                                            bridge_control.process_new_position(position_data['x'], position_data['y'])
-                                        except Exception as e:
-                                            print(f"Error calling bridge_control.process_new_position: {e}")
-
-                            latest_data.update({
-                                'timestamp': time.time(),
-                                'anchors': all_anchors_status,
-                                'packet_count': packet_count,
-                                'device_port': port,
-                                'format': f'{len(anchors)} Active Anchor{"s" if len(anchors) != 1 else ""}',
-                                'position': position_data
-                            })
+                        process_uwb_packet(packet, port)
 
                 if len(buffer) > 5000:
                     buffer = buffer[-2000:]
@@ -922,6 +973,10 @@ if __name__ == "__main__":
     print("="*50)
     load_calibration()
     print("✓ Calibration data loaded")
+
+    # Start the MQTT subscriber thread
+    mqtt_thread = threading.Thread(target=run_mqtt_subscriber, daemon=True)
+    mqtt_thread.start()
 
     uwb_thread = threading.Thread(target=read_uwb_data, args=(uwb_port,), daemon=True)
     uwb_thread.start()
