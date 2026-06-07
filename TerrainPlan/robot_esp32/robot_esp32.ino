@@ -6,7 +6,7 @@
   2. Connects to the public MQTT broker (broker.hivemq.com).
   3. Subscribes to the topic "rover/motors/commands".
   4. Parses commands in the format "left_speed,right_speed" (e.g. "180,180").
-  5. Controls a standard H-Bridge motor driver (e.g. L298N, TB6612FNG) using PWM.
+  5. Controls a Cytron Maker Drive motor driver using dual PWM.
 
   Dependencies:
   - PubSubClient library (by Nick O'Leary) - install via Arduino Library Manager.
@@ -29,18 +29,15 @@ const int mqtt_port = 1883;
 const char* mqtt_topic = "rover/motors/commands";
 const char* client_id = "ESP32_Rover_Client";
 
-// Pin Definitions for L298N / TB6612FNG H-Bridge Motor Driver
+// Pin Definitions for Cytron Maker Drive dual-channel motor driver
 // (Change these pins to match your physical wiring)
-#define PIN_L_PWM 12   // Speed Control Left (ENA)
-#define PIN_L_IN1 14   // Direction 1 Left (IN1)
-#define PIN_L_IN2 27   // Direction 2 Left (IN2)
+#define PIN_L_M1A 12   // Left Motor M1A Input (PWM/DIR)
+#define PIN_L_M1B 14   // Left Motor M1B Input (PWM/DIR)
 
-#define PIN_R_PWM 13   // Speed Control Right (ENB)
-#define PIN_R_IN3 26   // Direction 1 Right (IN3)
-#define PIN_R_IN4 25   // Direction 2 Right (IN4)
+#define PIN_R_M2A 13   // Right Motor M2A Input (PWM/DIR)
+#define PIN_R_M2B 25   // Right Motor M2B Input (PWM/DIR)
 
 // PWM parameters (analogWrite handles these automatically on ESP32 Core v2.0+)
-// If using older ESP32 core, we use ledc commands (see setup() and setMotorSpeed())
 #define PWM_FREQUENCY 5000
 #define PWM_RESOLUTION 8  // 8-bit resolution (0-255)
 
@@ -58,13 +55,11 @@ unsigned long lastReconnectAttempt = 0;
 
 void setupMotors() {
   // Configure control pins as outputs
-  pinMode(PIN_L_PWM, OUTPUT);
-  pinMode(PIN_L_IN1, OUTPUT);
-  pinMode(PIN_L_IN2, OUTPUT);
+  pinMode(PIN_L_M1A, OUTPUT);
+  pinMode(PIN_L_M1B, OUTPUT);
 
-  pinMode(PIN_R_PWM, OUTPUT);
-  pinMode(PIN_R_IN3, OUTPUT);
-  pinMode(PIN_R_IN4, OUTPUT);
+  pinMode(PIN_R_M2A, OUTPUT);
+  pinMode(PIN_R_M2B, OUTPUT);
 
   // Initialize motors to stopped state
   stopRobot();
@@ -75,20 +70,17 @@ void setMotorLeft(int speed) {
   speed = const_rain(speed, -255, 255);
 
   if (speed > 0) {
-    // Forward
-    digitalWrite(PIN_L_IN1, HIGH);
-    digitalWrite(PIN_L_IN2, LOW);
-    analogWrite(PIN_L_PWM, speed);
+    // Forward: M1A = PWM, M1B = LOW
+    analogWrite(PIN_L_M1A, speed);
+    digitalWrite(PIN_L_M1B, LOW);
   } else if (speed < 0) {
-    // Reverse
-    digitalWrite(PIN_L_IN1, LOW);
-    digitalWrite(PIN_L_IN2, HIGH);
-    analogWrite(PIN_L_PWM, abs(speed));
+    // Reverse: M1A = LOW, M1B = PWM
+    digitalWrite(PIN_L_M1A, LOW);
+    analogWrite(PIN_L_M1B, abs(speed));
   } else {
-    // Halt / Brake
-    digitalWrite(PIN_L_IN1, LOW);
-    digitalWrite(PIN_L_IN2, LOW);
-    analogWrite(PIN_L_PWM, 0);
+    // Active Brake: Both HIGH (Cytron Maker Drive supports active braking on both HIGH)
+    digitalWrite(PIN_L_M1A, HIGH);
+    digitalWrite(PIN_L_M1B, HIGH);
   }
 }
 
@@ -97,20 +89,17 @@ void setMotorRight(int speed) {
   speed = const_rain(speed, -255, 255);
 
   if (speed > 0) {
-    // Forward
-    digitalWrite(PIN_R_IN3, HIGH);
-    digitalWrite(PIN_R_IN4, LOW);
-    analogWrite(PIN_R_PWM, speed);
+    // Forward: M2A = PWM, M2B = LOW
+    analogWrite(PIN_R_M2A, speed);
+    digitalWrite(PIN_R_M2B, LOW);
   } else if (speed < 0) {
-    // Reverse
-    digitalWrite(PIN_R_IN3, LOW);
-    digitalWrite(PIN_R_IN4, HIGH);
-    analogWrite(PIN_R_PWM, abs(speed));
+    // Reverse: M2A = LOW, M2B = PWM
+    digitalWrite(PIN_R_M2A, LOW);
+    analogWrite(PIN_R_M2B, abs(speed));
   } else {
-    // Halt / Brake
-    digitalWrite(PIN_R_IN3, LOW);
-    digitalWrite(PIN_R_IN4, LOW);
-    analogWrite(PIN_R_PWM, 0);
+    // Active Brake: Both HIGH (Cytron Maker Drive supports active braking on both HIGH)
+    digitalWrite(PIN_R_M2A, HIGH);
+    digitalWrite(PIN_R_M2B, HIGH);
   }
 }
 
