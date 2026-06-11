@@ -7,7 +7,7 @@ import serial
 import time
 import sys
 
-PORT = 'COM8'
+PORT = 'COM15'
 BAUD = 115200
 
 class BU03Device:
@@ -98,7 +98,7 @@ class BU03Device:
         response = self.send(cmd)
         print(f"Set config: {response}")
 
-        if save and "OK" in response:
+        if save and ("OK" in response or "setcfg" in response.lower() or "id:" in response.lower()):
             print("\nSaving configuration (device will reboot)...")
             self.send_with_reboot("AT+SAVE")
 

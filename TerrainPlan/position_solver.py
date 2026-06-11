@@ -123,7 +123,7 @@ class PositionSolver:
         # Get positioning parameters
         pos_config = self.config.get('positioning', {})
         self.min_anchors = pos_config.get('min_anchors', 4)
-        self.max_residual = pos_config.get('max_residual', 0.5)
+        self.max_residual = pos_config.get('max_residual', 5.0)
         self.outlier_threshold = pos_config.get('outlier_threshold', 0.3)
 
         # Initialize Kalman filter
@@ -185,8 +185,9 @@ class PositionSolver:
         anchor_positions = np.array(anchor_positions)
         distances = np.array(distances)
 
-        # Initial guess: center of room or weighted centroid of anchors
+        # Initial guess: weighted centroid of anchors for X/Y, but force Z near the ground
         initial_guess = np.mean(anchor_positions, axis=0)
+        initial_guess[2] = 0.34  # Force initial guess to 34cm height (rover height) to break symmetry
 
         # Use previous Kalman position as initial guess if available
         if self.use_kalman and self.kalman.initialized:
@@ -199,7 +200,7 @@ class PositionSolver:
                 initial_guess,
                 args=(anchor_positions, distances),
                 method='lm',  # Levenberg-Marquardt
-                max_nfev=100
+                max_nfev=1000
             )
 
             if not result.success:
@@ -210,7 +211,7 @@ class PositionSolver:
             residual = np.sqrt(np.mean(result.fun**2))  # RMS residual
 
             # Validate position is within room bounds (with some margin)
-            margin = 1.0  # Allow 1m outside room for edge cases
+            margin = 5.0  # Allow 5m outside room for edge cases
             if not (self.room_bounds['x'][0] - margin <= position[0] <= self.room_bounds['x'][1] + margin and
                     self.room_bounds['y'][0] - margin <= position[1] <= self.room_bounds['y'][1] + margin and
                     self.room_bounds['z'][0] - margin <= position[2] <= self.room_bounds['z'][1] + margin):

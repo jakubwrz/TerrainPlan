@@ -1,30 +1,30 @@
 {
   "room": {
-    "width": 4.0,
-    "depth": 3.0,
+    "width": 20.0,
+    "depth": 20.0,
     "height": 2.5,
     "description": "Room dimensions in meters (width=x, depth=y, height=z)"
   },
   "coordinate_system": {
     "origin": "South-West corner at floor level",
-    "x_axis": "East (4m)",
-    "y_axis": "North (3m)",
+    "x_axis": "East (20m)",
+    "y_axis": "North (20m)",
     "z_axis": "Up (2.5m)"
   },
   "anchors": {
     "0": {
-      "position": [0.0, 2.5, 0.0],
-      "description": "North-West corner, ceiling",
+      "position": [0.0, 0.0, 1.0],
+      "description": "Mast 1 (100cm)",
       "enabled": true
     },
     "1": {
-      "position": [3.5, 3.0, 1.0],
-      "description": "North-East corner, ceiling",
+      "position": [0.0, 6.5, 1.0],
+      "description": "Mast 2 (100cm)",
       "enabled": true
     },
     "2": {
-      "position": [3.5, 0.4, 0.6],
-      "description": "South-East corner, mid-height",
+      "position": [12.1, 0.0, 0.75],
+      "description": "Mast 3 (75cm)",
       "enabled": true
     },
     "3": {
@@ -54,8 +54,8 @@
     }
   },
   "positioning": {
-    "min_anchors": 4,
-    "max_residual": 0.5,
+    "min_anchors": 3,
+    "max_residual": 5.0,
     "outlier_threshold": 0.3,
     "kalman_filter": {
       "enabled": true,

@@ -14,6 +14,11 @@ import threading
 from position_solver import PositionSolver
 import numpy as np
 import paho.mqtt.client as mqtt
+import os
+import sys
+import subprocess
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anchor_config.json')
 
 try:
     import bridge_control
@@ -57,7 +62,7 @@ def load_calibration():
     """Load calibration data from anchor_config.json"""
     global calibration_config
     try:
-        with open('anchor_config.json', 'r') as f:
+        with open(CONFIG_PATH, 'r') as f:
             config = json.load(f)
             calibration_config = config.get('calibration', {
                 'scale_factor': 1.0,
@@ -80,7 +85,7 @@ def save_calibration():
 
         config['calibration'] = calibration_config
 
-        with open('anchor_config.json', 'w') as f:
+        with open(CONFIG_PATH, 'w') as f:
             json.dump(config, f, indent=2)
 
         return True
@@ -166,50 +171,46 @@ def get_all_anchors_status(current_anchors):
     return all_anchors
 
 def parse_uwb_packet(data):
-    """Parse CmdM:4[ format - extract up to 8 anchor distances"""
-    header = b'CmdM:4['
-    if header not in data:
-        return None
-
-    start = data.find(header)
-    end = data.find(b'\r\n', start)
-    if end == -1:
-        return None
-
-    packet = data[start:end]
-    payload = packet[7:]
-
-    # Parse 16-bit LE values
-    values = []
-    for i in range(0, len(payload) - 1, 2):
-        if i + 1 < len(payload):
-            value = struct.unpack('<H', payload[i:i+2])[0]
-            values.append(value)
-
-    # Extract anchor distances based on pattern
-    # Position 4 is counter/timestamp (SKIP)
-    # Anchor positions increment by 2: 5, 7, 9, 11, 13, 15, 17, 19
+    """Parse CmdM:4[ format OR Binary PA2 format - extract up to 8 anchor distances"""
     anchors = {}
 
-    anchor_positions = {
-        '0': 5,
-        '1': 7,
-        '2': 9,
-        '3': 11,
-        '4': 13,
-        '5': 15,
-        '6': 17,
-        '7': 19
-    }
+    # Check for Binary Format (0xAA 0x25 0x01 ... 0x55)
+    if len(data) == 37 and data[0] == 0xAA and data[1] == 0x25 and data[2] == 0x01 and data[-1] == 0x55:
+        # Validate checksum (sum of bytes 0-34, lower 8 bits)
+        checksum = sum(data[0:35]) & 0xFF
+        if checksum == data[35]:
+            for anchor_id in range(8):
+                idx = 3 + (anchor_id * 4)
+                distance_mm = struct.unpack('<I', data[idx:idx+4])[0]
+                if 100 < distance_mm < 50000:
+                    raw_distance = distance_mm / 1000.0
+                    calibrated_distance = apply_calibration(str(anchor_id), raw_distance)
+                    anchors[str(anchor_id)] = calibrated_distance
+            return anchors if anchors else None
 
-    for anchor_id, pos in anchor_positions.items():
-        if len(values) > pos and 100 < values[pos] < 10000:
-            raw_distance = values[pos] / 1000.0
-            # Apply per-anchor software calibration (device onboard calibration not working as expected)
-            calibrated_distance = apply_calibration(anchor_id, raw_distance)
-            anchors[anchor_id] = calibrated_distance
+    # Check for ASCII format CmdM:4[
+    header = b'CmdM:4['
+    if header in data:
+        start = data.find(header)
+        end = data.find(b'\r\n', start)
+        if end != -1:
+            packet = data[start:end]
+            payload = packet[7:]
+            values = []
+            for i in range(0, len(payload) - 1, 2):
+                if i + 1 < len(payload):
+                    value = struct.unpack('<H', payload[i:i+2])[0]
+                    values.append(value)
+            
+            anchor_positions = {'0': 5, '1': 7, '2': 9, '3': 11, '4': 13, '5': 15, '6': 17, '7': 19}
+            for anchor_id, pos in anchor_positions.items():
+                if len(values) > pos and 100 < values[pos] < 50000:
+                    raw_distance = values[pos] / 1000.0
+                    calibrated_distance = apply_calibration(anchor_id, raw_distance)
+                    anchors[anchor_id] = calibrated_distance
+            return anchors if anchors else None
 
-    return anchors if anchors else None
+    return None
 
 # Thread lock to protect concurrent updates to latest_data/solver from Serial and MQTT threads
 data_lock = threading.Lock()
@@ -238,6 +239,10 @@ def process_uwb_packet(packet, source_name):
 
         # Get full status for all 8 anchors
         all_anchors_status = get_all_anchors_status(anchors)
+
+        # if latest_data['packet_count'] % 10 == 0:
+        #     dist_str = ", ".join([f"A{k}: {v:.2f}m" for k, v in sorted(anchors.items())])
+        #     print(f"Distances: [{dist_str}]")
 
         # Calculate 3D position if solver is available
         position_data = {
@@ -274,6 +279,8 @@ def process_uwb_packet(packet, source_name):
                         bridge_control.process_new_position(position_data['x'], position_data['y'])
                     except Exception as e:
                         print(f"Error calling bridge_control.process_new_position: {e}")
+            # else:
+            #     print(f"⚠️ Position solver rejected coordinates: {result.get('failure_reason')}")
 
         latest_data.update({
             'timestamp': time.time(),
@@ -292,22 +299,52 @@ def run_mqtt_subscriber():
 
     print(f"Starting MQTT UWB subscriber on {mqtt_broker}:{mqtt_port}, topic: {mqtt_topic}")
 
-    def on_connect(client, userdata, flags, rc):
-        if rc == 0:
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        if reason_code == 0:
             print("✓ Connected to HiveMQ MQTT Broker for UWB telemetry!")
-            client.subscribe(mqtt_topic)
+            client.subscribe("rover/uwb/raw")
         else:
-            print(f"❌ Failed to connect to MQTT broker, rc={rc}")
+            print(f"MQTT Connect failed with code {reason_code}")
+
+    mqtt_buffer = bytearray()
 
     def on_message(client, userdata, msg):
+        nonlocal mqtt_buffer
         try:
-            # Check if payload contains the UWB packet signature
-            if b'CmdM:4[' in msg.payload:
-                process_uwb_packet(msg.payload, "MQTT (Wireless)")
+            mqtt_buffer.extend(msg.payload)
+
+            # Process ASCII frames
+            while b'CmdM:4[' in mqtt_buffer and b'\r\n' in mqtt_buffer:
+                start = mqtt_buffer.find(b'CmdM:4[')
+                end = mqtt_buffer.find(b'\r\n', start)
+                if start != -1 and end != -1:
+                    packet = mqtt_buffer[start:end+2]
+                    mqtt_buffer = mqtt_buffer[end+2:]
+                    process_uwb_packet(packet, "MQTT (ASCII)")
+
+            # Process Binary frames
+            while True:
+                start = mqtt_buffer.find(b'\xAA\x25\x01')
+                if start != -1 and len(mqtt_buffer) >= start + 37:
+                    if mqtt_buffer[start+36] == 0x55:
+                        packet = mqtt_buffer[start:start+37]
+                        mqtt_buffer = mqtt_buffer[start+37:]
+                        process_uwb_packet(packet, "MQTT (Binary)")
+                    else:
+                        mqtt_buffer = mqtt_buffer[start+1:]
+                else:
+                    break
+
+            if len(mqtt_buffer) > 5000:
+                mqtt_buffer = mqtt_buffer[-2000:]
         except Exception as e:
             print(f"Error in MQTT packet callback: {e}")
 
-    client = mqtt.Client()
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    except AttributeError:
+        client = mqtt.Client()
+        
     client.on_connect = on_connect
     client.on_message = on_message
 
@@ -960,7 +997,7 @@ if __name__ == "__main__":
     print("Initializing 3D Position Solver")
     print("="*50)
     try:
-        position_solver = PositionSolver('anchor_config.json')
+        position_solver = PositionSolver(CONFIG_PATH)
         print("✓ Position solver ready")
     except Exception as e:
         print(f"Warning: Could not initialize position solver: {e}")
@@ -980,6 +1017,16 @@ if __name__ == "__main__":
 
     uwb_thread = threading.Thread(target=read_uwb_data, args=(uwb_port,), daemon=True)
     uwb_thread.start()
+
+    # Automatically launch the live dashboard visualizer
+    print("\n" + "="*50)
+    print("Launching Live Map Dashboard")
+    print("="*50)
+    try:
+        subprocess.Popen([sys.executable, "live_map.py"])
+        print("✓ Live Map spawned in background")
+    except Exception as e:
+        print(f"⚠️ Could not auto-start live_map.py: {e}")
 
     time.sleep(1)
     run_server(http_port)

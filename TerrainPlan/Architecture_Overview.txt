@@ -1,0 +1,69 @@
+Autonomous UWB Rover - Deep Technical Architecture & Algorithm Overview
+======================================================================
+
+This document provides a highly detailed, low-level explanation of every software component, algorithm, and hardware interface in the robotics stack.
+
+1. The Mission Planner: TerrainPlan.py
+--------------------------------------
+Purpose: Translates real-world satellite imagery into a mathematical grid and calculates the optimal obstacle-free path.
+Technical Details:
+- GeoTIFF Processing: Uses `rasterio` and `numpy` to ingest high-resolution satellite imagery and elevation data. It categorizes pixels into traversable "grass" and non-traversable "obstacles" (trees, concrete).
+- Costmap Inflation: Applies a safety buffer (costmap inflation) around obstacles so the rover's physical footprint doesn't clip corners.
+- Pathfinding Engine: Uses the A* (A-Star) search algorithm. It explores the grid using a heuristic cost function (Euclidean distance) to guarantee the shortest possible path from Start to Goal while strictly avoiding inflated obstacles.
+- Affine Transformation: When you click the physical anchor locations on the screen, the script calculates a transformation matrix. This matrix converts pixel coordinates (screen space) into physical meters (grass space) and vice versa.
+- Outputs: 
+  * `path_config.json`: Stores the pixel coordinates of the anchors and the Start/Goal markers.
+  * `outputs/csv/path_coordinates.csv`: An ordered sequence of absolute [X, Y] physical coordinates (in meters) that the rover must visit.
+
+2. The Math Engine: position_solver.py
+--------------------------------------
+Purpose: Converts 1-dimensional radio ranges into a highly stable 3-dimensional physical coordinate.
+Technical Details:
+- Non-linear Multilateration: Takes the raw scalar distances to the anchors and formulates a system of sphere equations: (x - Ax)^2 + (y - Ay)^2 + (z - Az)^2 - d^2 = 0.
+- Optimization Algorithm: Uses `scipy.optimize.least_squares` with the Levenberg-Marquardt ('lm') algorithm to iteratively minimize the mathematical residuals and find the intersection point of the spheres.
+- Outlier Rejection: If the primary solver fails to converge due to severe radio multi-pathing or noise, it falls back to a RANSAC-style approach, testing subsets of anchors to find a valid geometric intersection.
+- State Estimation (Kalman Filter): Passes the raw solver coordinate through a state-space Kalman Filter. The filter uses process noise (Q) and measurement noise (R) matrices to model the physics of the rover. It predicts where the rover should be based on its previous velocity, compares it to the noisy new measurement, and outputs a mathematically smoothed coordinate.
+
+3. The Main Brain: uwb_server.py
+--------------------------------------
+Purpose: Ingests hardware telemetry and orchestrates the entire data pipeline.
+Technical Details:
+- Serial Ingestion: Spawns a background daemon thread that continuously reads the COM port at 115200 baud. It searches the byte stream for the specific BU03 binary packet header (`0xAA 0x25 0x01`).
+- Byte Unpacking: Uses Python's `struct` library to unpack 32-bit unsigned integers (`<I`) representing millimeters, converts them to meters, and validates the checksum to prevent corrupted data.
+- Pipeline Execution: Feeds the dictionary of distances to the `PositionSolver`. If a valid 3D coordinate is returned, it immediately triggers `bridge_control.py`.
+- Automated Tooling: Automatically uses `subprocess.Popen` to launch the `live_map.py` visualizer in a parallel process.
+
+4. The Driver: bridge_control.py
+--------------------------------------
+Purpose: The autonomous steering controller.
+Technical Details:
+- Displacement Tracking: Calculates the rover's current physical heading (Yaw angle) by computing the arctangent (`math.atan2(dy, dx)`) of its displacement over the last two position updates.
+- Angular Math: Calculates the ideal target angle to the active waypoint. It subtracts the current heading from the target heading, and normalizes the error between -PI and +PI radians to find the shortest turn direction.
+- Proportional Differential Steering: Uses a Proportional (P) controller scalar (`kp = 35.0`). It subtracts this error from the left motor base speed and adds it to the right motor base speed. This causes the rover to smoothly arc toward the target rather than violently zigzagging (Bang-Bang).
+- Waypoint Logic: Calculates the Euclidean distance to the current target. If the distance drops below the Acceptance Radius (0.30 meters), the target pointer shifts to the next row in the CSV.
+- Software Watchdog: Runs a background `threading.Timer`. If `uwb_server.py` fails to provide a new coordinate for >1.5 seconds, it forcefully publishes a "0,0" speed command to halt the rover.
+- Network Layer: Uses `paho.mqtt.client` to package the integer speeds (e.g., "180,145") and publish them over the internet via QoS 0.
+
+5. The Brawn (Hardware): robot_esp8266.ino
+--------------------------------------
+Purpose: The embedded C++ firmware responsible for translating internet packets into high-current electrical signals.
+Technical Details:
+- Networking: Uses the `ESP8266WiFi` library to maintain a TCP/IP connection to the local hotspot, and `PubSubClient` to hold a persistent socket to the public MQTT broker (`broker.hivemq.com`).
+- Packet Parsing: Uses C-style `sscanf` to parse incoming comma-separated strings back into memory-efficient integer types.
+- Hardware PWM: Commands the Cytron Maker Drive IC. It pulls the Direction pins (M1A/M2A) HIGH or LOW, and writes an 8-bit (0-255) Pulse Width Modulation (PWM) duty cycle to the Speed pins (M1B/M2B) to physically vary the voltage hitting the DC motors.
+- Hardware Watchdog: The `loop()` architecture continuously monitors the `millis()` system timer. If more than 1500ms elapse without a fresh MQTT packet arriving, it overrides all memory buffers and forces the PWM output to 0, ensuring an absolute fail-safe stop.
+
+6. The Dashboard: live_map.py
+--------------------------------------
+Purpose: Real-time graphical monitoring interface.
+Technical Details:
+- Graphics Engine: Uses `matplotlib.pyplot` and `matplotlib.animation.FuncAnimation` to render at 30+ FPS. 
+- Inverse Transformation: Reads incoming physical coordinates (meters) from MQTT and multiplies them against the inverse affine transformation matrix to mathematically project them back into pixel coordinates.
+- Overlays: Draws the A* path as a scatter plot and dynamically updates a "red dot" scatter object to represent the rover's live position on top of the original satellite GeoTIFF.
+
+7. The Tooling: configure_tags.py & bu03_util.py
+--------------------------------------
+Purpose: Low-level firmware programmers for the BU03 Decawave DW3000 UWB chips.
+Technical Details:
+- AT Command Parsing: Sends raw ASCII AT commands over Serial to modify the internal NVRAM of the UWB modules.
+- Radio Physics Tuning: Reconfigures the DW3000 RF transceiver from the default Channel 9 (8.0 GHz) down to Channel 5 (6.5 GHz) for improved Fresnel-zone penetration, and reduces the symbol data rate from 6.8 Mbps to 850 kbps. This drastically increases the receiver sensitivity (link budget), effectively doubling the maximum operational range at the cost of air-time throughput.

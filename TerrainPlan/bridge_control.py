@@ -3,6 +3,8 @@ import math
 import paho.mqtt.client as mqtt
 import os
 import sys
+import time
+import threading
 
 # Ensure stdout supports UTF-8 on Windows
 if sys.platform == "win32":
@@ -39,14 +41,33 @@ except FileNotFoundError:
 
 active_wp_idx = 0
 current_heading = 0.0
-last_x, last_y = 0.0, 0.0
+last_x, last_y = None, None
+last_update_time = time.time()
+watchdog_active = True
+
+def watchdog_thread():
+    """Background thread to stop motors if position updates drop out"""
+    global last_update_time, watchdog_active
+    while watchdog_active:
+        if time.time() - last_update_time > 1.5:
+            client.publish(MQTT_TOPIC_COMMANDS, "0,0")
+        time.sleep(0.5)
+
+# Start watchdog thread
+threading.Thread(target=watchdog_thread, daemon=True).start()
 
 def process_new_position(filtered_x, filtered_y):
     """
     Call this function inside your raw uwb_server loop 
     every time a fresh Kalman filter coordinate is solved!
     """
-    global active_wp_idx, current_heading, last_x, last_y
+    global active_wp_idx, current_heading, last_x, last_y, last_update_time
+    
+    last_update_time = time.time()
+
+    if last_x is None:
+        last_x, last_y = filtered_x, filtered_y
+        return  # Wait for the next update to calculate real displacement
     
     if active_wp_idx >= len(waypoints):
         # Path complete: Publish absolute halt command
@@ -60,17 +81,25 @@ def process_new_position(filtered_x, filtered_y):
     dy = target_y - filtered_y
     distance = math.sqrt(dx**2 + dy**2)
     
-    # Waypoint Acceptance Threshold (30 cm)
-    if distance < 0.30:
-        print(f"✓ Waypoint {active_wp_idx} cleared. Target shifted.")
+    # Waypoint Acceptance Threshold
+    # Wide radius for intermediate waypoints (smooth sailing through path),
+    # tight radius for the final goal (stop precisely on target).
+    is_final = (active_wp_idx == len(waypoints) - 1)
+    threshold = 0.40 if is_final else 1.50
+    if distance < threshold:
+        print(f"✓ Waypoint {active_wp_idx} cleared (d={distance:.2f}m). Target shifted.")
         active_wp_idx += 1
         return
 
-    # Estimate current orientation orientation based on displacement vectors
+    # Estimate current orientation based on displacement vectors
+    # (Threshold 15cm to prevent stationary UWB noise from causing random spins)
     move_dx = filtered_x - last_x
     move_dy = filtered_y - last_y
-    if math.sqrt(move_dx**2 + move_dy**2) > 0.02:
+    
+    if math.sqrt(move_dx**2 + move_dy**2) > 0.15:
         current_heading = math.atan2(move_dy, move_dx)
+        # FATAL BUG FIX: Only update last_x and last_y when we ACTUALLY travel 15cm!
+        last_x, last_y = filtered_x, filtered_y
 
     # Compute Heading Corrections
     target_angle = math.atan2(dy, dx)
@@ -79,21 +108,30 @@ def process_new_position(filtered_x, filtered_y):
     # Normalize steering angles between -pi and +pi
     heading_error = (heading_error + math.pi) % (2 * math.pi) - math.pi
     
-    # Differential Drive Steering Proportional Transform Logic
-    base_speed = 180
-    kp = 70.0  # Proportional steering sensitivity scalar
+    # Proportional Steering Controller (Single Tag UWB MUST drive forward to track heading)
+    base_speed = 225
+    kp = 50.0  # Tuned for sharp but forward-moving arcs
     steering_bias = int(heading_error * kp)
     
-    left_speed = base_speed - steering_bias
-    right_speed = base_speed + steering_bias
+    # CRITICAL: In this UWB coordinate system, L > R (physical right turn)
+    # causes heading to INCREASE. So when error is positive (target > heading,
+    # heading needs to increase), we need L > R → left = base + bias.
+    left_speed = base_speed + steering_bias
+    right_speed = base_speed - steering_bias
     
-    # Clamp velocities to hardware 8-bit registers (0-255)
-    left_speed = max(0, min(255, left_speed))
-    right_speed = max(0, min(255, right_speed))
+    # Anti-stall clamp: on thick grass, wheels below ~190 PWM can stall
+    MIN_GRASS_PWM = 190
+    left_speed = max(MIN_GRASS_PWM, min(255, left_speed))
+    right_speed = max(MIN_GRASS_PWM, min(255, right_speed))
     
-    # Package into lightweight ASCII token CSV payloads
+    # Package and send (no swap — motors are wired correctly)
     payload = f"{left_speed},{right_speed}"
     client.publish(MQTT_TOPIC_COMMANDS, payload)
     
-    # Cache metrics for next loop displacement tracking
-    last_x, last_y = filtered_x, filtered_y
+    # --- DEBUG FEEDBACK ---
+    curr_deg = math.degrees(current_heading)
+    tgt_deg = math.degrees(target_angle)
+    err_deg = math.degrees(heading_error)
+    print(f"WP[{active_wp_idx}] | "
+          f"Heading: {curr_deg:5.1f}° | Target: {tgt_deg:5.1f}° | Err: {err_deg:5.1f}° | "
+          f"Motors: L={left_speed:3d} R={right_speed:3d}")

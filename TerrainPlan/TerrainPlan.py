@@ -52,6 +52,72 @@ def get_geotiff_bounds(image):
         print(f"  Warning: Error parsing GeoTIFF tags: {e}")
     return None
 
+def find_image_markers(img_data):
+    """
+    Scans the image for pure colored pixels acting as physical markers:
+    Anchor 0: Red (255, 0, 0)
+    Anchor 1: Green (0, 255, 0)
+    Anchor 2: Blue (0, 0, 255)
+    Goal: Cyan (0, 255, 255)
+    Start: Magenta (255, 0, 255)
+    """
+    markers = {}
+    
+    r = img_data[:, :, 0].astype(int)
+    g = img_data[:, :, 1].astype(int)
+    b = img_data[:, :, 2].astype(int)
+    
+    mask_red = (r > 200) & (g < 50) & (b < 50)
+    mask_green = (r < 50) & (g > 200) & (b < 50)
+    mask_blue = (r < 50) & (g < 50) & (b > 200)
+    mask_cyan = (r < 50) & (g > 200) & (b > 200)
+    mask_magenta = (r > 200) & (g < 50) & (b > 200)
+    
+    def get_center(mask):
+        y, x = np.where(mask)
+        if len(x) > 0:
+            return float(np.mean(x)), float(np.mean(y))
+        return None
+
+    markers['A0'] = get_center(mask_red)
+    markers['A1'] = get_center(mask_green)
+    markers['A2'] = get_center(mask_blue)
+    markers['GOAL'] = get_center(mask_cyan)
+    markers['START'] = get_center(mask_magenta)
+    
+    return markers
+
+def calculate_affine_transform(px_points, uwb_points):
+    """
+    Calculates the 2D affine transformation matrix from pixel coordinates to UWB coordinates.
+    """
+    if len(px_points) != 3 or len(uwb_points) != 3:
+        return None
+        
+    M = np.array([
+        [px_points[0][0], px_points[0][1], 1],
+        [px_points[1][0], px_points[1][1], 1],
+        [px_points[2][0], px_points[2][1], 1]
+    ])
+    
+    U = np.array([uwb_points[0][0], uwb_points[1][0], uwb_points[2][0]])
+    V = np.array([uwb_points[0][1], uwb_points[1][1], uwb_points[2][1]])
+    
+    try:
+        ABC = np.linalg.solve(M, U)
+        DEF = np.linalg.solve(M, V)
+    except np.linalg.LinAlgError:
+        print("  Error: Matrix is singular. The three anchors must not be collinear on the image.")
+        return None
+        
+    def transform(px_x, px_y):
+        uwb_x = ABC[0]*px_x + ABC[1]*px_y + ABC[2]
+        uwb_y = DEF[0]*px_x + DEF[1]*px_y + DEF[2]
+        return float(uwb_x), float(uwb_y)
+        
+    return transform
+
+
 
 # =============================================================================
 # FEATURE EXTRACTION
@@ -492,10 +558,11 @@ def get_height_from_map(x, y, minx, miny, maxx, maxy, heightmap_array):
 # =============================================================================
 
 def generate_terrain_grid(image, minx, miny, maxx, maxy, cell_size, 
-                          heightmap_array=None, classifier=None, label_names=None):
+                          heightmap_array=None, classifier=None, label_names=None, transform_func=None):
     """
     Splits the map into a grid and analyzes each cell.
     Uses ML classifier if available, otherwise falls back to HSV rules.
+    If transform_func is provided, calculates UWB real coordinates directly.
     """
     width, height = image.size
     img_data = np.array(image)
@@ -546,8 +613,14 @@ def generate_terrain_grid(image, minx, miny, maxx, maxy, cell_size,
         idx = 0
         for cx in range(num_cells_x):
             for cy in range(num_cells_y):
-                real_x = minx + (cx + 0.5) * cell_size
-                real_y = miny + (cy + 0.5) * cell_size
+                px_x = (cx / num_cells_x) * width
+                px_y = (1.0 - (cy / num_cells_y)) * height
+                
+                if transform_func:
+                    real_x, real_y = transform_func(px_x, px_y)
+                else:
+                    real_x = minx + (cx + 0.5) * cell_size
+                    real_y = miny + (cy + 0.5) * cell_size
                 
                 r, g, b = all_rgb[idx]
                 terrain_type = idx_to_label.get(predictions[idx], 'UNKNOWN')
@@ -560,8 +633,8 @@ def generate_terrain_grid(image, minx, miny, maxx, maxy, cell_size,
                 grid_data.append({
                     'grid_x': cx,
                     'grid_y': cy,
-                    'real_x': round(real_x, 2),
-                    'real_y': round(real_y, 2),
+                    'real_x': round(real_x, 4),
+                    'real_y': round(real_y, 4),
                     'height': round(h_val, 2),
                     'terrain_type': terrain_type,
                     'r': int(round(r)),
@@ -576,18 +649,24 @@ def generate_terrain_grid(image, minx, miny, maxx, maxy, cell_size,
         # Fallback: HSV rule-based classification
         for cx in range(num_cells_x):
             for cy in range(num_cells_y):
-                real_x = minx + (cx + 0.5) * cell_size
-                real_y = miny + (cy + 0.5) * cell_size
+                px_x = (cx / num_cells_x) * width
+                px_y = (1.0 - (cy / num_cells_y)) * height
                 
-                px_x = int((cx / num_cells_x) * width)
-                px_y = int((1.0 - (cy / num_cells_y)) * height)
-                px_x = max(0, min(px_x, width - 1))
-                px_y = max(0, min(px_y, height - 1))
+                if transform_func:
+                    real_x, real_y = transform_func(px_x, px_y)
+                else:
+                    real_x = minx + (cx + 0.5) * cell_size
+                    real_y = miny + (cy + 0.5) * cell_size
+                
+                px_xi = int(px_x)
+                px_yi = int(px_y)
+                px_xi = max(0, min(px_xi, width - 1))
+                px_yi = max(0, min(px_yi, height - 1))
                 
                 if is_color:
-                    r, g, b = get_averaged_rgb(img_data, px_x, px_y, PIXEL_AVERAGE_RADIUS, width, height)
+                    r, g, b = get_averaged_rgb(img_data, px_xi, px_yi, PIXEL_AVERAGE_RADIUS, width, height)
                 else:
-                    val = img_data[px_y, px_x] if len(img_data.shape) == 2 else 0
+                    val = img_data[px_yi, px_xi] if len(img_data.shape) == 2 else 0
                     r = g = b = float(val)
                 
                 terrain_type = classify_terrain_hsv_fallback(r, g, b)
@@ -599,8 +678,8 @@ def generate_terrain_grid(image, minx, miny, maxx, maxy, cell_size,
                 grid_data.append({
                     'grid_x': cx,
                     'grid_y': cy,
-                    'real_x': round(real_x, 2),
-                    'real_y': round(real_y, 2),
+                    'real_x': round(real_x, 4),
+                    'real_y': round(real_y, 4),
                     'height': round(h_val, 2),
                     'terrain_type': terrain_type,
                     'r': int(round(r)),
@@ -855,12 +934,74 @@ def main():
         print(f"  Y: [{min_y:.2f}, {max_y:.2f}] (height: {max_y - min_y:.2f} m)")
     else:
         min_x, min_y, max_x, max_y = MIN_X, MIN_Y, MAX_X, MAX_Y
-        print("No GeoTIFF bounds found. Falling back to default coordinate bounds:")
-        print(f"  X: [{min_x:.2f}, {max_x:.2f}]")
-        print(f"  Y: [{min_y:.2f}, {max_y:.2f}]")
+        print("No GeoTIFF bounds found. Falling back to default coordinate bounds.")
+        
+    # --- UWB MARKER ALIGNMENT ---
+    img_data = np.array(image)
+    markers = find_image_markers(img_data)
+    transform_func = None
+    path_config = {
+        'markers': markers, 
+        'image_size': [image.width, image.height],
+        'transform_matrix': None, 
+        'use_transform': False
+    }
+    
+    if markers['A0'] and markers['A1'] and markers['A2']:
+        print("\n✓ Detected physical UWB anchors on the image (Red, Green, Blue)!")
+        
+        uwb_points = [(0.0, 2.5), (3.5, 3.0), (3.5, 0.4)]
+        config_path = os.path.abspath(os.path.join(script_dir, "anchor_config.json"))
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    cfg = json.load(f)
+                    uwb_points = [
+                        cfg['anchors']['0']['position'][:2],
+                        cfg['anchors']['1']['position'][:2],
+                        cfg['anchors']['2']['position'][:2]
+                    ]
+            except Exception as e:
+                print(f"Failed to read anchor_config.json, using defaults: {e}")
+                
+        px_points = [markers['A0'], markers['A1'], markers['A2']]
+        transform_func = calculate_affine_transform(px_points, uwb_points)
+        
+        if transform_func:
+            print("✓ Successfully calibrated image to UWB coordinate system.")
+            path_config['use_transform'] = True
+            
+            # Save the matrix parameters by calculating transform for basis vectors
+            origin = transform_func(0, 0)
+            dx = transform_func(1, 0)
+            dy = transform_func(0, 1)
+            path_config['transform_matrix'] = {
+                'A': dx[0] - origin[0], 'B': dy[0] - origin[0], 'C': origin[0],
+                'D': dx[1] - origin[1], 'E': dy[1] - origin[1], 'F': origin[1]
+            }
+            
+            # Also calculate the inverse matrix
+            M = np.array([[path_config['transform_matrix']['A'], path_config['transform_matrix']['B']],
+                          [path_config['transform_matrix']['D'], path_config['transform_matrix']['E']]])
+            try:
+                M_inv = np.linalg.inv(M)
+                path_config['inverse_matrix'] = {
+                    'A': M_inv[0, 0], 'B': M_inv[0, 1], 'C': -M_inv[0, 0]*origin[0] - M_inv[0, 1]*origin[1],
+                    'D': M_inv[1, 0], 'E': M_inv[1, 1], 'F': -M_inv[1, 0]*origin[0] - M_inv[1, 1]*origin[1]
+                }
+            except np.linalg.LinAlgError:
+                print("Warning: Transform matrix is not invertible.")
+    
+    if markers['START']:
+        print("✓ Detected START marker (Magenta)")
+    if markers['GOAL']:
+        print("✓ Detected GOAL marker (Cyan)")
+        
+    config_file_path = os.path.join(output_dir, 'path_config.json')
+    with open(config_file_path, 'w') as f:
+        json.dump(path_config, f, indent=4)
         
     # --- ML CLASSIFIER TRAINING ---
-    img_data = np.array(image)
     training_json_path = os.path.join(target_dir, TRAINING_SAMPLES_FILENAME)
     
     classifier = None
@@ -873,7 +1014,6 @@ def main():
         print(f"  Found {len(y_train)} total training samples globally!")
         classifier = train_classifier(X_train, y_train, label_names)
         
-        # Generate training visualization for target directory if JSON exists
         if os.path.exists(training_json_path):
             train_vis_path = os.path.join(img_dir, "visualization_training.png")
             generate_training_visualization(image, training_json_path, train_vis_path)
@@ -902,7 +1042,7 @@ def main():
         
     # 3. Analyze and Generate Grid
     grid = generate_terrain_grid(image, min_x, min_y, max_x, max_y, GRID_CELL_SIZE, 
-                                 heightmap_array, classifier, label_names)
+                                 heightmap_array, classifier, label_names, transform_func)
     
     # 4. Export to CSV (includes HSV debug columns)
     csv_filename = os.path.join(csv_dir, "terrain_grid.csv")
