@@ -1,5 +1,3 @@
-import sys
-import time
 from bu03_util import BU03Device, PORT
 
 def print_header(title):

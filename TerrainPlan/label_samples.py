@@ -21,13 +21,11 @@ Controls:
 import sys
 import os
 import json
-from PIL import Image, ImageDraw, ImageFont
-import numpy as np
+from PIL import Image
 
 # Try to use tkinter for a GUI approach
 try:
     import tkinter as tk
-    from tkinter import messagebox
     HAS_TK = True
 except ImportError:
     HAS_TK = False
